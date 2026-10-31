@@ -31,8 +31,7 @@ int bitAnd(int x, int y) {
  *   Difficulty: 1
  */
 int bitXor(int x, int y) {
-    return ~(~(x & ~y) & ~(~x & y));
-
+    return ~(x & y) & ~(~x & ~y);
 }
 
 /*
@@ -113,22 +112,13 @@ int logtwo(int v) {
  */
 int byteSwap(int x,int n,int m)
 {
-    int nShift=n<<3;
-    int mShift=m<<3;
+    int ns = n << 3;
+    int ms = m << 3;
+    int diff = ((x >> ns) ^ (x >> ms)) & 0xff;
 
-    int nByte=(x>>nShift)&0xff;
-    int mByte=(x>>mShift)&0xff;
-
-    int nMask=0xff<<nShift;
-    int mMask=0xff<<mShift;
-
-    x=x&~nMask;
-    x=x&~mMask;
-
-    x=x|(nByte<<mShift);
-    x=x|(mByte<<nShift);
-
-    return x;
+    /* Toggle differing bits; unsigned shifts safely reach the sign bit. */
+    return x ^ ((diff & 0xffu) << ns)
+             ^ ((diff & 0xffu) << ms);
 }
 
 /*
@@ -160,10 +150,12 @@ unsigned reverse(unsigned v)
  */
 int logicalShift(int x,int n)
 {
-    int mask;
-    mask=~(((1<<31)>>n)<<1);
+    /* For n > 0 use INT_MAX >> (n - 1); for n == 0 use all ones. */
+    int zero = !n;
+    int mask = (0x7fffffff >> ((n + 31) & 31))
+               | (~zero + 1);
 
-    return (x>>n)&mask;
+    return (x >> n) & mask;
 }
 /*
  * leftBitCount - returns count of number of consective 1's in left-hand (most) end of word.
@@ -175,27 +167,31 @@ int logicalShift(int x,int n)
  */
 int leftBitCount(int x)
 {
-    int count=0;
-    int y;
-    y=~((x>>16)^0xffff);
-    y=!!y;
-    count=count+(y<<4);
-    x=x<<(y<<4);
-    y=~((x>>24)^0xff);
-    y=!!y;
-    count=count+(y<<3);
-    x=x<<(y<<3);
-    y=~((x>>28)^0xf);
-    y=!!y;
-    count=count+(y<<2);
-    x=x<<(y<<2);
-    y=~((x>>30)^0x3);
-    y=!!y;
-    count=count+(y<<1);
-    x=x<<(y<<1);
-    count=count+((x>>31)&1);
+    int y = ~x;
+    int count = 0;
+    int shift;
 
-    return count;
+    /* Find the highest set bit of ~x using only safe right shifts. */
+    shift = !!(y >> 16) << 4;
+    count = count + shift;
+    y = y >> shift;
+
+    shift = !!(y >> 8) << 3;
+    count = count + shift;
+    y = y >> shift;
+
+    shift = !!(y >> 4) << 2;
+    count = count + shift;
+    y = y >> shift;
+
+    shift = !!(y >> 2) << 1;
+    count = count + shift;
+    y = y >> shift;
+
+    count = count + !!(y >> 1);
+
+    /* A zero complement contributes the extra bit for x == -1. */
+    return 32 + ~count + !y;
 }
 /*
  * float_i2f - Return bit-level equivalent of expression (float) x
@@ -207,57 +203,38 @@ int leftBitCount(int x)
  */
 unsigned float_i2f(int x)
 {
-    unsigned sign=0;
-    unsigned abs;
+    unsigned sign = 0;
+    unsigned mag;
+    unsigned exp = 158;
     unsigned frac;
-    unsigned exp;
-    unsigned mask;
     unsigned rest;
-    int shift;
-    int i;
-    if(x==0){
+
+    if (!x) {
         return 0;
     }
-    if(x<0){
-        sign=0x80000000;
-        abs=-x;
-    }
-    else{
-        abs=x;
-    }
-    i=31;
-    while(((abs>>i)&1)==0){
-        i=i-1;
+
+    if (x < 0) {
+        sign = 0x80000000u;
+        mag = ~x;
+        mag = mag + 1u;
+    } else {
+        mag = x;
     }
 
-    exp=i+127;
-
-    if(i<=23){
-        frac=(abs<<(23-i))&0x7fffff;
-    }
-    else{
-        shift=i-23;
-        frac=(abs>>shift)&0x7fffff;
-        mask=(1<<shift)-1;
-        rest=abs&mask;
-        if(rest>(1<<(shift-1))){
-            frac=frac+1;
-        }
-        else if(rest==(1<<(shift-1))){
-            if(frac&1){
-                frac=frac+1;
-            }
-        }
-
-        if(frac>>23){
-            exp=exp+1;
-            frac=0;
-        }
+    /* Normalize with the leading one at bit 31, including INT_MIN. */
+    while (!(mag & 0x80000000u)) {
+        mag = mag << 1;
+        exp = exp - 1u;
     }
 
-    return sign|(exp<<23)|frac;
+    frac = (mag >> 8) & 0x7fffffu;
+    rest = mag & 0xffu;
+
+    /* Round to nearest even; addition carries into the exponent. */
+    return (sign | (exp << 23) | frac)
+           + ((rest > 0x80u)
+              | ((rest == 0x80u) & (frac & 1u)));
 }
-
 /*
  * floatScale2 - Return bit-level equivalent of expression 2*f for
  *   floating point argument f.
@@ -306,42 +283,34 @@ unsigned floatScale2(unsigned uf)
  */
 int float64_f2i(unsigned uf1,unsigned uf2)
 {
-    int sign;
-    int exp;
-    int shift;
-    unsigned fracHigh;
-    unsigned fracLow;
-    unsigned val;
+    int sign = uf2 >> 31;
+    int exp = (uf2 >> 20) & 0x7ffu;
+    int e = exp - 1023;
+    int val;
+    unsigned mantissa;
 
-    sign=uf2>>31;
-
-    exp=((uf2>>20)&0x7ff)-1023;
-
-    if(exp<0){
+    if (e < 0) {
         return 0;
     }
 
-    if(exp>30){
-        return 0x80000000;
+    /* e == 31 also returns the required bit pattern for INT_MIN. */
+    if (e > 30) {
+        return ~0x7fffffff;
     }
 
-    fracHigh=uf2&0xfffff;
-    fracLow=uf1;
+    mantissa = (uf2 & 0xfffffu) | 0x100000u;
 
-    if(exp>=20){
-        val=fracHigh<<12;
-        val=val|(fracLow>>20);
-        val=val<<(exp-20);
-    }
-    else{
-        val=fracHigh<<12;
-        val=val|(fracLow>>20);
-        val=val>>(20-exp);
+    /* Handle e == 20 separately so the low word is never shifted by 32. */
+    if (e < 20) {
+        val = mantissa >> (20 - e);
+    } else if (e > 20) {
+        val = (mantissa << (e - 20))
+              | (uf1 >> (52 - e));
+    } else {
+        val = mantissa;
     }
 
-    val=val|(1<<exp);
-
-    if(sign){
+    if (sign) {
         return -val;
     }
 
